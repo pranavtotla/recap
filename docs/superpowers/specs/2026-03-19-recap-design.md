@@ -37,7 +37,7 @@ The competitive landscape has a clear gap:
 
 Closest competitor **agentsview** indexes sessions across tools with analytics and AI insights — but serves developers, not product teams. Recap's differentiation is the **translation layer**: turning rich session context into structured, audience-appropriate communication.
 
-**TAM:** $180M-360M (10% of multi-tool developers paying $10-20/user/month).
+**TAM estimate:** ~30M professional developers worldwide. 95% use AI tools weekly (Pragmatic Engineer 2026), 70% use 2-4 tools simultaneously. Assuming 20M multi-tool devs, 10% conversion at $12/user/month = ~$290M ARR ceiling. Conservative near-term: 1% of addressable = ~$29M.
 
 ## Architecture
 
@@ -115,14 +115,54 @@ interface CommitInfo {
 ### Output: DailySummary (synthesizer output)
 
 ```typescript
-interface DailySummary {
-  date: string;
-  engineer: string;
+interface SummaryItem {
+  title: string;                 // one-line description
+  project: string;               // which project this relates to
+  description: string;           // 1-2 sentence detail
+  relatedCommits?: string[];     // commit SHAs that support this item
+  relatedSessions?: string[];    // session IDs that produced this
+}
 
-  decisions: DecisionItem[];     // what changed from the plan
-  blockers: BlockerItem[];       // what needs product input
-  shipped: ShippedItem[];        // what's done/deployable
-  inProgress: ProgressItem[];    // what's still cooking
+interface DecisionItem extends SummaryItem {
+  previousApproach?: string;     // what was the plan before
+  rationale: string;             // why the change was made
+}
+
+interface BlockerItem extends SummaryItem {
+  needsInputFrom: "product" | "engineering" | "design" | "external";
+  severity: "blocking" | "slowing";
+}
+
+interface ShippedItem extends SummaryItem {
+  commits: string[];             // commit SHAs
+  filesChanged: number;
+}
+
+interface ProgressItem extends SummaryItem {
+  estimatedCompletion?: string;  // e.g. "tomorrow", "end of sprint"
+}
+
+interface TeamSummary {
+  date: string;
+  teamId: string;
+  engineers: string[];
+  allShipped: ShippedItem[];
+  allBlockers: BlockerItem[];
+  allDecisions: DecisionItem[];
+  allInProgress: ProgressItem[];
+  totalSessions: number;
+  projectsTouched: string[];
+}
+
+interface DailySummary {
+  date: string;                  // ISO date
+  engineer: string;
+  timezone: string;              // IANA timezone, e.g. "Asia/Kolkata"
+
+  decisions: DecisionItem[];
+  blockers: BlockerItem[];
+  shipped: ShippedItem[];
+  inProgress: ProgressItem[];
 
   sessionCount: number;
   projectsTouched: string[];
@@ -136,7 +176,8 @@ interface DailySummary {
 ### Claude Code Collector
 
 - **Input:** `~/.claude/projects/{encoded-cwd}/*.jsonl`
-- **Method:** Claude Agent SDK (`listSessions`, `getSessionMessages`). Extract user prompts, `tool_use` blocks (Edit/Write = file changes, Bash = commands), git branch from message metadata.
+- **Method:** Parse JSONL files directly. The Claude Agent SDK exposes `listSessions` and `getSessionMessages` (TypeScript), but these APIs are relatively new and may change. Primary implementation should parse JSONL directly for stability; SDK can be used as an optional optimization path if available at build time.
+- **Extract:** User prompts (`type: "user"`), `tool_use` blocks from assistant messages (Edit/Write = file changes, Bash = commands run), `gitBranch` and `cwd` from message metadata.
 - **Signal:** High — full conversations with tool calls.
 
 ### Codex Collector
@@ -155,7 +196,7 @@ interface DailySummary {
 ### Git Collector
 
 - **Input:** Configured list of repo paths (auto-detected from session cwds).
-- **Method:** `git log --since="today 00:00" --author={configured} --stat`
+- **Method:** `git log --since="today 00:00" --author={configured} --stat`. Author matching uses email (`git log --author="<email>"`) to avoid substring collisions. The configured `git.author` field accepts either a name or email; email is recommended.
 - **Signal:** Ground truth — what actually landed in the codebase.
 
 ## Synthesizer
@@ -225,6 +266,46 @@ Small Express server (Fly.io/Railway, ~$5/month) that:
 
 This server becomes the v2 dashboard backend.
 
+### Server API Contract
+
+**Authentication:** Each team gets a team ID + API key pair generated server-side during `recap init --team` (server creates team, returns credentials). The CLI sends `Authorization: Bearer <api_key>` with every request over HTTPS (TLS required — server rejects non-HTTPS). Slack slash commands are verified using Slack's signing secret (`X-Slack-Signature` header validation). Rate limit: 1 summary per engineer per date per day.
+
+**Endpoints:**
+
+```
+POST /api/v1/summaries
+  Headers: Authorization: Bearer <api_key>
+  Body: DailySummary (JSON)
+  Response: 201 { id: string }
+  Errors: 401 Unauthorized, 422 Validation error
+
+GET /api/v1/summaries?date=2026-03-19&engineer=pranav
+  Headers: Authorization: Bearer <api_key>
+  Response: 200 { summaries: DailySummary[] }
+
+GET /api/v1/summaries/team?date=2026-03-19
+  Headers: Authorization: Bearer <api_key>
+  Response: 200 { summaries: DailySummary[], aggregated: TeamSummary }
+
+GET /api/v1/summaries/blockers?since=2026-03-17
+  Headers: Authorization: Bearer <api_key>
+  Response: 200 { blockers: BlockerItem[] }
+
+POST /api/v1/slack/commands
+  (Slack slash command webhook — verified via signing secret)
+  Routes to appropriate query based on command text
+```
+
+**Stored data model:** The server stores only `DailySummary` objects — synthesized summaries, never raw session data. Raw session content stays on the engineer's machine.
+
+## Privacy & Data Handling
+
+- **What leaves the machine:** Only the synthesized `DailySummary` (decisions, blockers, shipped items, progress). Never raw session transcripts, prompts, or tool outputs.
+- **LLM processing:** Raw session data is sent to the configured LLM provider (Anthropic/OpenAI) for synthesis. This is the same data the engineer already sent to those providers during their coding sessions. No new exposure.
+- **Server storage:** Only `DailySummary` JSON. Retained for 90 days by default (configurable). Deleted when an engineer is removed from the team.
+- **Redaction:** The engineer review step (`[e]dit`) is the redaction gate. Engineers can remove any item before sending. The CLI also auto-strips file paths that match `.env`, `credentials`, `secret`, `token`, `password` patterns from summary items.
+- **No session linking:** The server never receives session IDs, transcript paths, or raw prompts. It cannot reconstruct what happened in a session — only what the engineer chose to share.
+
 ## Configuration
 
 ```yaml
@@ -235,8 +316,9 @@ projects:                     # auto-detected from session cwds, or manual
     name: monorepo
   - path: ~/snaptrude/snapai
     name: snapai
+timezone: Asia/Kolkata              # IANA timezone for "today" boundary
 git:
-  author: pranav
+  author: pranav@snaptrude.com      # email recommended over name
 slack:
   webhook_url: ${RECAP_SLACK_WEBHOOK}
   channel: "#eng-updates"
@@ -255,28 +337,54 @@ llm:
 |----------|----------|
 | Cursor SQLite locked | Skip Cursor data, note in summary footer |
 | No sessions found | Print "No activity found for today." Don't post |
-| Massive session (3000+ msgs) | Truncate to first prompt + last 20 messages + all tool_use blocks |
+| Massive session (3000+ msgs) | Token budget: 4K tokens per session for Stage 1. Priority: (1) first user prompt, (2) all commit messages, (3) tool_use blocks with file paths (names only, not content), (4) last 10 user prompts, (5) fill remaining budget with assistant text snippets |
 | Overlapping sessions (same work in Claude + Cursor) | Git deduplicates by commit SHA; synthesizer handles narrative dedup |
 | LLM API down/rate-limited | Fall back to structured template (facts only, no synthesis) |
 | Bad summary quality | Engineer catches in review step; can regenerate or edit |
 | Slack webhook fails | Save to `~/.recap/outbox/`, retry next run, print to stdout |
 | Server unreachable | Post to Slack webhook directly, queue server push for retry |
 
-## MVP Scope
+## MVP Scope (Phased)
 
-### In
+### Phase 1: Walking Skeleton (week 1)
 
-- Claude Code collector
-- Codex collector
-- Cursor collector
+Validates the core value proposition: can the tool produce useful summaries?
+
+- Claude Code collector (JSONL parsing)
 - Git collector
-- 2-stage LLM synthesizer
-- Engineer review TUI
-- Slack webhook delivery
-- Slack bot (team queries)
-- `recap init` + `recap` commands
-- Local markdown output
-- Server for bot aggregation
+- Single-stage LLM synthesis (Sonnet, no micro-summary stage)
+- Markdown output to stdout
+- `recap init` (minimal: detect Claude Code, configure LLM key)
+- `recap --dry-run`
+
+**Done when:** Running `recap` on a day with 3+ Claude Code sessions produces a summary that an engineer rates as "accurate" for 4/5 items.
+
+### Phase 2: Full Collection (week 2)
+
+- Codex collector (SQLite + JSONL)
+- Cursor collector (vscdb)
+- 2-stage synthesizer (micro-summaries + synthesis)
+- Token budget and truncation logic
+
+**Done when:** Running `recap` with sessions across all three tools produces a unified summary with no duplicate items for the same work.
+
+### Phase 3: Delivery (week 3)
+
+- Engineer review TUI (`[e]dit` opens `$EDITOR` on a temp markdown file, `[s]end` posts, `[q]uit` aborts)
+- Slack webhook delivery (Block Kit formatting)
+- `recap init` full flow (detect tools, configure Slack webhook, test post)
+- Outbox retry logic
+
+**Done when:** An engineer can run `recap`, review, edit, and post to a Slack channel. A PM confirms the Slack message is readable and useful.
+
+### Phase 4: Team Layer (week 4)
+
+- Server (Express on Fly.io) with API endpoints
+- CLI pushes `DailySummary` to server on send
+- Slack bot with `/recap team`, `/recap blockers`, `/recap @engineer`, `/recap project`
+- Team setup flow (`recap init --team`)
+
+**Done when:** Two engineers post summaries. A PM runs `/recap team` and sees an aggregated view.
 
 ### Out (v2+)
 
@@ -286,6 +394,70 @@ llm:
 - Weekly/sprint rollups
 - Historical analytics
 - Custom summary templates
+
+## `recap init` Flow
+
+```
+$ recap init
+
+Welcome to Recap!
+
+Detecting AI coding tools...
+  Claude Code: found (19 projects, 47 sessions)
+  Codex CLI:   found (470 sessions across 54 projects)
+  Cursor:      found (global state database detected)
+  Git:         found
+
+Your name (for summaries): pranav
+Git author email (for commit matching): pranav@snaptrude.com
+
+LLM provider:
+  [1] Anthropic (recommended)
+  [2] OpenAI
+  > 1
+
+Anthropic API key: sk-ant-...
+  Testing... OK
+
+Slack integration (optional, can configure later):
+  Webhook URL: https://hooks.slack.com/services/T.../B.../...
+  Testing... OK, posted to #eng-updates
+
+Team server (optional, can configure later):
+  Server URL: https://recap.yourteam.com
+  API key: rk_...
+  Testing... OK, connected to team "snaptrude"
+
+Config written to ~/.recap/config.yaml
+Run `recap --dry-run` to preview your first summary!
+```
+
+If run without flags, skips Slack and server setup. `recap init --slack` adds Slack. `recap init --team` adds server.
+
+## Testing & Acceptance Criteria
+
+### Collector tests
+- **Claude:** Given a fixture JSONL file with 50 messages (user + assistant + tool_use), produces valid `ActivityEvent` with correct file lists and tool counts.
+- **Codex:** Given a fixture SQLite with 5 threads, produces 5 `ActivityEvent`s with correct titles, cwds, and token counts.
+- **Cursor:** Given a fixture vscdb with 3 composers, produces 3 `ActivityEvent`s. Handles locked database gracefully (returns empty array + warning).
+- **Git:** Given a test repo with 10 commits across 2 branches, produces correct `CommitInfo[]` filtered by author and date.
+
+### Synthesizer tests
+- Given 8 `ActivityEvent`s across 3 projects, produces a `DailySummary` where:
+  - All 4 categories (shipped/decisions/blockers/inProgress) are populated
+  - No item appears in multiple categories
+  - Every `ShippedItem` references at least one real commit SHA
+  - Synthesis completes in under 15 seconds
+- Given overlapping sessions (same files in Claude + Cursor), produces no duplicate items.
+- Given an empty `ActivityEvent[]`, returns a summary with all empty categories.
+
+### Delivery tests
+- Slack Block Kit output is valid (passes Slack's block validation).
+- Server POST succeeds with valid auth, returns 401 without auth.
+- Outbox retry: failed Slack post is saved and retried on next `recap` run.
+
+### End-to-end acceptance
+- An engineer with 5+ real sessions across Claude Code + Codex runs `recap` and confirms the output is accurate for 80%+ of items without manual editing.
 
 ## Distribution
 
