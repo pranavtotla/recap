@@ -31,6 +31,11 @@ describe("validateConfig", () => {
     expect(() => validateConfig(config as any)).toThrow("llm");
   });
 
+  it("rejects config missing projects array", () => {
+    const config = { engineer: "a", timezone: "UTC", git: { author: "a" }, llm: { provider: "anthropic", model: "x" } };
+    expect(() => validateConfig(config as any)).toThrow("projects");
+  });
+
   it("accepts a valid config", () => {
     const config: RecapConfig = {
       engineer: "test",

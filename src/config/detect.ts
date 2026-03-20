@@ -1,5 +1,6 @@
-import { existsSync, readdirSync } from "node:fs";
+import { readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 
 export interface DetectedTools {
   claude: { found: boolean; projectCount: number; sessionCount: number; path: string };
@@ -9,18 +10,20 @@ export interface DetectedTools {
 }
 
 export function detectTools(): DetectedTools {
-  const home = process.env.HOME || process.env.USERPROFILE || "";
+  const home = homedir();
 
   const claudePath = join(home, ".claude", "projects");
   let claudeProjects = 0;
   let claudeSessions = 0;
-  if (existsSync(claudePath)) {
-    const dirs = readdirSync(claudePath, { withFileTypes: true });
-    claudeProjects = dirs.filter((d) => d.isDirectory()).length;
-    for (const dir of dirs.filter((d) => d.isDirectory())) {
+  try {
+    const dirs = readdirSync(claudePath, { withFileTypes: true }).filter((d) => d.isDirectory());
+    claudeProjects = dirs.length;
+    for (const dir of dirs) {
       const files = readdirSync(join(claudePath, dir.name));
       claudeSessions += files.filter((f) => f.endsWith(".jsonl")).length;
     }
+  } catch {
+    // Directory not found — Claude Code not installed
   }
 
   const codexPath = join(home, ".codex");
@@ -30,7 +33,7 @@ export function detectTools(): DetectedTools {
 
   return {
     claude: {
-      found: existsSync(claudePath) && claudeProjects > 0,
+      found: claudeProjects > 0,
       projectCount: claudeProjects,
       sessionCount: claudeSessions,
       path: claudePath,

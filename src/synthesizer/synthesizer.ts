@@ -53,15 +53,23 @@ export function parseLLMResponse(
     date,
     engineer,
     timezone,
-    decisions: parsed.decisions || [],
-    blockers: parsed.blockers || [],
-    shipped: parsed.shipped || [],
-    inProgress: parsed.inProgress || [],
+    decisions: filterValidItems(parsed.decisions),
+    blockers: filterValidItems(parsed.blockers),
+    shipped: filterValidItems(parsed.shipped),
+    inProgress: filterValidItems(parsed.inProgress),
     sessionCount: events.filter((e) => e.source !== "git").length,
     projectsTouched: [...allProjects],
     totalTokensUsed: totalTokens,
     estimatedHoursActive: Math.round((totalMinutes / 60) * 10) / 10,
   };
+}
+
+/** Drop malformed items from LLM output — each must have at minimum title + project. */
+function filterValidItems<T>(items: unknown): T[] {
+  if (!Array.isArray(items)) return [];
+  return items.filter(
+    (item) => item && typeof item === "object" && typeof item.title === "string" && typeof item.project === "string"
+  );
 }
 
 function emptySummary(engineer: string, date: string, timezone: string): DailySummary {

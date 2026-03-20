@@ -50,6 +50,21 @@ describe("parseLLMResponse", () => {
   it("throws on invalid JSON", () => {
     expect(() => parseLLMResponse("not json", "u", "d", "UTC", [])).toThrow();
   });
+
+  it("filters out malformed items missing title or project", () => {
+    const json = JSON.stringify({
+      decisions: [{ wrong: "shape" }, { title: "Valid", project: "p", description: "d", rationale: "r" }],
+      blockers: "not an array",
+      shipped: [{ title: "No project field" }],
+      inProgress: [],
+    });
+
+    const result = parseLLMResponse(json, "testuser", "2026-03-19", "UTC", []);
+    expect(result.decisions).toHaveLength(1);
+    expect(result.decisions[0].title).toBe("Valid");
+    expect(result.blockers).toEqual([]);
+    expect(result.shipped).toEqual([]);
+  });
 });
 
 describe("synthesize", () => {

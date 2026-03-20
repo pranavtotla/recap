@@ -1,4 +1,6 @@
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { parse as parseYaml } from "yaml";
 import type { RecapConfig } from "../types.js";
 
@@ -19,11 +21,10 @@ export function validateConfig(config: unknown): asserts config is RecapConfig {
     throw new Error("Config missing 'llm.provider' and 'llm.model'");
   }
   if (!Array.isArray(c.projects)) {
-    (c as any).projects = [];
+    throw new Error("Config missing 'projects' array");
   }
 }
 
 export function getDefaultConfigPath(): string {
-  const home = process.env.HOME || process.env.USERPROFILE || "~";
-  return `${home}/.recap/config.yaml`;
+  return join(homedir(), ".recap", "config.yaml");
 }

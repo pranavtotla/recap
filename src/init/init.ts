@@ -1,5 +1,6 @@
 import { writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { detectTools } from "../config/detect.js";
@@ -48,7 +49,7 @@ export async function runInit(): Promise<void> {
     },
   };
 
-  const configDir = join(process.env.HOME || "", ".recap");
+  const configDir = join(homedir(), ".recap");
   await mkdir(configDir, { recursive: true });
   const configPath = join(configDir, "config.yaml");
   await writeFile(configPath, stringifyYaml(config), "utf-8");

@@ -6,6 +6,7 @@ import { GitCollector } from "./collectors/git.js";
 import { synthesize } from "./synthesizer/synthesizer.js";
 import { renderMarkdown } from "./delivery/markdown.js";
 import { runInit } from "./init/init.js";
+import { formatLocalDate } from "./utils.js";
 import type { ActivityEvent, Collector } from "./types.js";
 
 async function main() {
@@ -37,15 +38,20 @@ async function main() {
 
   const isDryRun = args.includes("--dry-run");
 
+  // Run collectors concurrently — they are independent
   const collectors: Collector[] = [new ClaudeCollector(), new GitCollector()];
-  const allEvents: ActivityEvent[] = [];
+  const results = await Promise.allSettled(
+    collectors.map((c) => c.collect(date, config))
+  );
 
-  for (const collector of collectors) {
-    try {
-      const events = await collector.collect(date, config);
-      allEvents.push(...events);
-    } catch (e: any) {
-      console.error(`Warning: ${collector.name} collector failed: ${e.message}`);
+  const allEvents: ActivityEvent[] = [];
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    if (result.status === "fulfilled") {
+      allEvents.push(...result.value);
+    } else {
+      const msg = result.reason instanceof Error ? result.reason.message : String(result.reason);
+      console.error(`Warning: ${collectors[i].name} collector failed: ${msg}`);
     }
   }
 
@@ -58,10 +64,9 @@ async function main() {
 
   console.log(`Found ${allEvents.length} activity events. Synthesizing...\n`);
 
-  const dateStr = new Intl.DateTimeFormat("en-CA", { timeZone: config.timezone }).format(date);
   const summary = await synthesize(allEvents, {
     engineer: config.engineer,
-    date: dateStr,
+    date: formatLocalDate(date, config.timezone),
     timezone: config.timezone,
     model: config.llm.model,
   });
@@ -75,6 +80,7 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error("Error:", e.message);
+  const msg = e instanceof Error ? e.message : String(e);
+  console.error("Error:", msg);
   process.exit(1);
 });

@@ -1,21 +1,26 @@
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, open } from "node:fs/promises";
 import { join, basename } from "node:path";
+import { homedir } from "node:os";
+import { expandPath, formatLocalDate } from "../utils.js";
 import type { ActivityEvent, Collector, RecapConfig } from "../types.js";
+
+const MAX_USER_PROMPTS = 20;
 
 export class ClaudeCollector implements Collector {
   name = "claude";
 
   async collect(date: Date, config: RecapConfig): Promise<ActivityEvent[]> {
-    const home = process.env.HOME || process.env.USERPROFILE || "";
-    const projectsDir = join(home, ".claude", "projects");
+    const projectsDir = join(homedir(), ".claude", "projects");
+    const targetDate = formatLocalDate(date, config.timezone);
 
-    const events: ActivityEvent[] = [];
     let projectDirs: string[];
     try {
       projectDirs = await readdir(projectsDir);
     } catch {
       return [];
     }
+
+    const events: ActivityEvent[] = [];
 
     for (const projDir of projectDirs) {
       const projPath = join(projectsDir, projDir);
@@ -29,19 +34,47 @@ export class ClaudeCollector implements Collector {
       }
 
       const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
-      for (const file of jsonlFiles) {
-        try {
-          const event = await parseClaudeSession(join(projPath, file), projectName);
-          if (isFromDate(event.timestamp, date, config.timezone)) {
-            events.push(event);
+
+      // Parse matching files concurrently within each project
+      const results = await Promise.all(
+        jsonlFiles.map(async (file) => {
+          try {
+            const filePath = join(projPath, file);
+            // Cheap date pre-filter: peek first timestamp before full parse
+            if (!(await matchesDate(filePath, targetDate, config.timezone))) {
+              return null;
+            }
+            return await parseClaudeSession(filePath, projectName);
+          } catch {
+            return null;
           }
-        } catch {
-          // Skip unparseable sessions
-        }
+        })
+      );
+
+      for (const event of results) {
+        if (event) events.push(event);
       }
     }
 
     return events;
+  }
+}
+
+/**
+ * Read just enough of the file to extract the first timestamp and check
+ * if it falls on the target date. Avoids fully parsing sessions from other days.
+ */
+async function matchesDate(filePath: string, targetDate: string, timezone: string): Promise<boolean> {
+  const fh = await open(filePath, "r");
+  try {
+    const buf = Buffer.alloc(4096);
+    await fh.read(buf, 0, 4096, 0);
+    const chunk = buf.toString("utf-8");
+    const match = chunk.match(/"timestamp"\s*:\s*"([^"]+)"/);
+    if (!match) return true; // Can't determine — parse fully
+    return formatLocalDate(new Date(match[1]), timezone) === targetDate;
+  } finally {
+    await fh.close();
   }
 }
 
@@ -136,7 +169,7 @@ export async function parseClaudeSession(
       commits: [],
       tokensUsed: 0,
     },
-    userPrompts,
+    userPrompts: userPrompts.slice(0, MAX_USER_PROMPTS),
     keyAssistantResponses: keyResponses.slice(0, 10),
   };
 }
@@ -144,17 +177,10 @@ export async function parseClaudeSession(
 function resolveProjectName(encodedDir: string, projects: { path: string; name: string }[]): string {
   const decodedPath = "/" + encodedDir.replace(/^-/, "").replace(/-/g, "/");
   for (const p of projects) {
-    const normalizedConfigPath = p.path.replace(/^~/, process.env.HOME || "");
+    const normalizedConfigPath = expandPath(p.path);
     if (decodedPath.startsWith(normalizedConfigPath) || decodedPath === normalizedConfigPath) {
       return p.name;
     }
   }
   return decodedPath.split("/").filter(Boolean).pop() || "unknown";
-}
-
-function isFromDate(timestamp: Date, date: Date, timezone: string): boolean {
-  const formatter = new Intl.DateTimeFormat("en-CA", { timeZone: timezone });
-  const eventDate = formatter.format(timestamp);
-  const targetDate = formatter.format(date);
-  return eventDate === targetDate;
 }
