@@ -1,0 +1,10 @@
+engineer: testuser
+timezone: Asia/Kolkata
+projects:
+  - path: /tmp/test-project
+    name: test-project
+git:
+  author: testuser@example.com
+llm:
+  provider: anthropic
+  model: claude-sonnet-4-6
